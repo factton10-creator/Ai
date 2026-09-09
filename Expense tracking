@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""
+Expense Tracker CLI
+--------------------
+A simple command-line tool to log expenses, view history, and generate
+monthly spending summaries with charts.
+
+Usage examples:
+    python expense_tracker.py add 45.50 Food "Groceries at Whole Foods"
+    python expense_tracker.py list
+    python expense_tracker.py list --category Food
+    python expense_tracker.py summary
+    python expense_tracker.py summary --chart
+    python expense_tracker.py delete 3
+"""
+
+import argparse
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+
+DB_PATH = Path(__file__).parent / "expenses.db"
+
+
+def get_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    with get_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                amount REAL NOT NULL,
+                category TEXT NOT NULL,
+                description TEXT
+            )
+            """
+        )
+
+
+def add_expense(amount: float, category: str, description: str = ""):
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "INSERT INTO expenses (date, amount, category, description) VALUES (?, ?, ?, ?)",
+            (date_str, amount, category, description),
+        )
+        print(f"Added expense #{cursor.lastrowid}: ${amount:.2f} [{category}] {description}")
+
+
+def list_expenses(category: str = None, month: str = None):
+    query = "SELECT * FROM expenses WHERE 1=1"
+    params = []
+
+    if category:
+        query += " AND category LIKE ?"
+        params.append(f"%{category}%")
+    if month:
+        query += " AND date LIKE ?"
+        params.append(f"{month}%")
+
+    query += " ORDER BY date DESC"
+
+    with get_connection() as conn:
+        rows = conn.execute(query, params).fetchall()
+
+    if not rows:
+        print("No expenses found.")
+        return
+
+    print(f"{'ID':<5}{'Date':<12}{'Amount':<10}{'Category':<15}{'Description'}")
+    print("-" * 65)
+    total = 0.0
+    for row in rows:
+        print(
+            f"{row['id']:<5}{row['date']:<12}${row['amount']:<9.2f}"
+            f"{row['category']:<15}{row['description'] or ''}"
+        )
+        total += row["amount"]
+    print("-" * 65)
+    print(f"Total: ${total:.2f} across {len(rows)} expense(s)")
+
+
+def delete_expense(expense_id: int):
+    with get_connection() as conn:
+        cursor = conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+        if cursor.rowcount:
+            print(f"Deleted expense #{expense_id}")
+        else:
+            print(f"No expense found with ID {expense_id}")
+
+
+def summary(show_chart: bool = False):
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT strftime('%Y-%m', date) AS month, category, SUM(amount) AS total
+            FROM expenses
+            GROUP BY month, category
+            ORDER BY month DESC
+            """
+        ).fetchall()
+
+    if not rows:
+        print("No expenses to summarize.")
+        return
+
+    monthly_totals = {}
+    category_totals = {}
+    for row in rows:
+        monthly_totals.setdefault(row["month"], 0.0)
+        monthly_totals[row["month"]] += row["total"]
+        category_totals.setdefault(row["category"], 0.0)
+        category_totals[row["category"]] += row["total"]
+
+    print("=== Monthly Totals ===")
+    for month, total in sorted(monthly_totals.items(), reverse=True):
+        print(f"{month}: ${total:.2f}")
+
+    print("\n=== Category Totals ===")
+    for cat, total in sorted(category_totals.items(), key=lambda x: -x[1]):
+        print(f"{cat}: ${total:.2f}")
+
+    if show_chart:
+        generate_charts(monthly_totals, category_totals)
+
+
+def generate_charts(monthly_totals: dict, category_totals: dict):
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("\nmatplotlib is not installed. Run: pip install matplotlib")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    months = sorted(monthly_totals.keys())
+    values = [monthly_totals[m] for m in months]
+    axes[0].bar(months, values, color="#4C72B0")
+    axes[0].set_title("Spending by Month")
+    axes[0].set_ylabel("Amount ($)")
+    axes[0].tick_params(axis="x", rotation=45)
+
+    categories = list(category_totals.keys())
+    cat_values = list(category_totals.values())
+    axes[1].pie(cat_values, labels=categories, autopct="%1.1f%%", startangle=90)
+    axes[1].set_title("Spending by Category")
+
+    plt.tight_layout()
+    output_path = Path(__file__).parent / "expense_summary.png"
+    plt.savefig(output_path)
+    print(f"\nChart saved to {output_path}")
+    plt.show()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Track and summarize personal expenses.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    add_parser = subparsers.add_parser("add", help="Add a new expense")
+    add_parser.add_argument("amount", type=float, help="Expense amount")
+    add_parser.add_argument("category", type=str, help="Expense category (e.g. Food, Rent)")
+    add_parser.add_argument("description", type=str, nargs="?", default="", help="Optional description")
+
+    list_parser = subparsers.add_parser("list", help="List expenses")
+    list_parser.add_argument("--category", type=str, help="Filter by category")
+    list_parser.add_argument("--month", type=str, help="Filter by month, format YYYY-MM")
+
+    subparsers.add_parser("summary", help="Show summary totals").add_argument(
+        "--chart", action="store_true", help="Also generate and show charts"
+    )
+
+    delete_parser = subparsers.add_parser("delete", help="Delete an expense by ID")
+    delete_parser.add_argument("id", type=int, help="Expense ID to delete")
+
+    args = parser.parse_args()
+
+    init_db()
+
+    if args.command == "add":
+        add_expense(args.amount, args.category, args.description)
+    elif args.command == "list":
+        list_expenses(category=args.category, month=args.month)
+    elif args.command == "summary":
+        summary(show_chart=args.chart)
+    elif args.command == "delete":
+        delete_expense(args.id)
+
+
+if __name__ == "__main__":
+    main()
