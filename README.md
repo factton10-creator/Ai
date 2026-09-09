@@ -16,7 +16,7 @@ including bar and pie charts.
 ## Setup
 
 ```bash
-git clone <your-repo-url>
+git clone <https://factton10-creator.github.io/Expense-tracking/ >
 cd expense-tracker-cli
 pip install -r requirements.txt
 ```
